@@ -251,13 +251,12 @@ public class StaticAnalyzer
 
     private static void CheckSignature(StaticAnalysisResult result)
     {
-        // Use WinVerifyTrust via process call for simplicity
         try
         {
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "powershell",
-                Arguments = $"-NoProfile -Command \"(Get-AuthenticodeSignature '{result.FilePath}').Status\"",
+                Arguments = $"-NoProfile -Command \"$s = Get-AuthenticodeSignature '{result.FilePath}'; $s.Status.ToString() + '|' + ($s.SignerCertificate.Subject ?? '')\"",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
@@ -267,9 +266,12 @@ public class StaticAnalyzer
             string output = proc.StandardOutput.ReadToEnd().Trim();
             proc.WaitForExit(5000);
 
-            if (output.Equals("Valid", StringComparison.OrdinalIgnoreCase))
+            string[] parts = output.Split('|', 2);
+            if (parts[0].Equals("Valid", StringComparison.OrdinalIgnoreCase))
             {
                 result.IsSigned = true;
+                if (parts.Length > 1 && !string.IsNullOrWhiteSpace(parts[1]))
+                    result.SignerName = parts[1];
             }
         }
         catch { /* signature check is best-effort */ }

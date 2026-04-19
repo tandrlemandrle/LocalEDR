@@ -12,7 +12,10 @@ public class ScoringEngine
     private const double NetworkWeight = 1.2;
 
     private static readonly string[] TrustedPublishers =
-        ["Microsoft", "Google", "Mozilla", "Adobe", "Oracle", "Apple"];
+        ["Microsoft", "Google", "Mozilla", "Adobe", "Oracle", "Apple",
+         "Valve", "GitHub", "JetBrains", "Discord", "Spotify", "Zoom",
+         "Slack", "Dropbox", "NVIDIA", "AMD", "Intel", "Logitech",
+         "Corsair", "Razer", "SteelSeries", "Epic Games"];
 
     private static readonly HashSet<string> KnownSystemProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -20,8 +23,36 @@ public class ScoringEngine
         "winlogon", "dwm", "explorer", "taskhostw", "sihost"
     };
 
+    // Hard ceiling: signed binaries from trusted publishers cannot exceed this score.
+    // This prevents auto-quarantine (threshold 100) of legitimate signed software.
+    private const int TrustedSignedMaxScore = 60;
+
+    // Self-hashes: files belonging to the EDR itself are always clean.
+    private static readonly HashSet<string> SelfHashes = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Register the EDR's own file hashes so it never quarantines itself.
+    /// Called once at startup by EDREngine.
+    /// </summary>
+    public static void RegisterSelfHashes(IEnumerable<string> sha256Hashes)
+    {
+        foreach (var h in sha256Hashes)
+            SelfHashes.Add(h);
+    }
+
     public ScoreBreakdown Calculate(AnalysisResult analysis)
     {
+        // Self-protection: if this file is part of the EDR, score it clean immediately
+        if (analysis.StaticResults?.Hashes.TryGetValue("SHA256", out var sha256) == true &&
+            SelfHashes.Contains(sha256))
+        {
+            return new ScoreBreakdown
+            {
+                TotalScore = 0, Verdict = "Clean", Confidence = "High",
+                Details = ["Self-hash match: EDR component (whitelisted)"]
+            };
+        }
+
         var breakdown = new ScoreBreakdown();
 
         // Static
@@ -89,6 +120,19 @@ public class ScoringEngine
             breakdown.Adjustments;
 
         breakdown.TotalScore = Math.Max(0, (int)Math.Round(weighted));
+
+        // Hard ceiling: trusted signed binaries cannot exceed TrustedSignedMaxScore.
+        // This prevents auto-quarantine of legitimate software like Steam, gh.exe, etc.
+        // The signature must be valid AND from a known trusted publisher.
+        if (analysis.StaticResults is { IsSigned: true, SignerName: not null } &&
+            TrustedPublishers.Any(p => analysis.StaticResults.SignerName.Contains(p, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (breakdown.TotalScore > TrustedSignedMaxScore)
+            {
+                breakdown.Details.Add($"Trusted publisher ceiling applied: {breakdown.TotalScore} -> {TrustedSignedMaxScore} (signed by {analysis.StaticResults.SignerName})");
+                breakdown.TotalScore = TrustedSignedMaxScore;
+            }
+        }
 
         // Verdict
         breakdown.Verdict = breakdown.TotalScore switch

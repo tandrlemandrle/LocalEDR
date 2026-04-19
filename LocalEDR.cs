@@ -13,6 +13,7 @@ using System.Management;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.ServiceProcess;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -324,6 +325,20 @@ namespace LocalEDR
                     r.Score += 15;
                     r.Indicators.Add(string.Format("Unusually small PE file ({0} bytes)", r.FileSize));
                 }
+
+                // Authenticode signature check
+                try
+                {
+                    var cert = new X509Certificate2(X509Certificate2.CreateFromSignedFile(filePath));
+                    if (cert != null)
+                    {
+                        var chain = new X509Chain();
+                        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                        if (chain.Build(cert))
+                            r.IsSigned = true;
+                    }
+                }
+                catch { /* unsigned or invalid signature */ }
             }
             catch (Exception ex)
             {
@@ -1909,14 +1924,35 @@ namespace LocalEDR
     static class ScoringEngine
     {
         const double WStatic = 1.0, WBehavior = 1.5, WYara = 1.3, WMitre = 0.8, WNetwork = 1.2;
+        const int TrustedSignedMaxScore = 60;
 
-        static readonly string[] TrustedPubs = {"Microsoft","Google","Mozilla","Adobe","Oracle","Apple"};
+        static readonly string[] TrustedPubs = {"Microsoft","Google","Mozilla","Adobe","Oracle","Apple",
+            "Valve","GitHub","JetBrains","Discord","Spotify","Zoom",
+            "Slack","Dropbox","NVIDIA","AMD","Intel","Logitech",
+            "Corsair","Razer","SteelSeries","Epic Games"};
         static readonly HashSet<string> SystemProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
             "svchost","csrss","lsass","services","smss","wininit","winlogon","dwm","explorer","taskhostw","sihost"
         };
 
+        // Self-hashes: EDR's own files always score Clean
+        static readonly HashSet<string> SelfHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        public static void RegisterSelfHashes(IEnumerable<string> hashes)
+        {
+            foreach (var h in hashes) SelfHashes.Add(h);
+        }
+
         public static void Calculate(AnalysisResult a)
         {
+            // Self-protection: EDR's own files are always clean
+            if (a.Static != null && !string.IsNullOrEmpty(a.Static.SHA256) && SelfHashes.Contains(a.Static.SHA256))
+            {
+                a.TotalScore = 0;
+                a.Verdict = "Clean";
+                a.Confidence = "High";
+                return;
+            }
+
             int sStatic = 0, sBehavior = 0, sYara = 0, sMitre = 0, sNetwork = 0, sHash = 0, sMemory = 0, adj = 0;
 
             if (a.Static != null) sStatic = Math.Min(a.Static.Score, 100);
@@ -1972,6 +2008,27 @@ namespace LocalEDR
 
             double weighted = sStatic * WStatic + sBehavior * WBehavior + sYara * WYara + sMitre * WMitre + sNetwork * WNetwork + sHash + sMemory * 1.4 + adj;
             a.TotalScore = Math.Max(0, (int)Math.Round(weighted));
+
+            // Hard ceiling: trusted signed binaries cannot exceed TrustedSignedMaxScore.
+            // Prevents auto-quarantine of legitimate signed software (Steam, gh.exe, etc.)
+            if (a.Static != null && a.Static.IsSigned)
+            {
+                try
+                {
+                    var sig = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromSignedFile(a.FilePath);
+                    string subject = sig != null ? sig.Subject : "";
+                    foreach (string pub in TrustedPubs)
+                    {
+                        if (subject.IndexOf(pub, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            if (a.TotalScore > TrustedSignedMaxScore)
+                                a.TotalScore = TrustedSignedMaxScore;
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
 
             if (a.TotalScore >= 120) a.Verdict = "Critical";
             else if (a.TotalScore >= 80) a.Verdict = "Malicious";
@@ -2504,12 +2561,11 @@ namespace LocalEDR
         {
             _whitelistPath = Path.Combine(baseDir, "whitelist.txt");
 
-            // Built-in whitelisted paths (Windows system, common safe locations)
+            // Built-in whitelisted paths (Windows system)
             _pathPrefixes.Add(@"C:\Windows\WinSxS\");
             _pathPrefixes.Add(@"C:\Windows\servicing\");
             _pathPrefixes.Add(@"C:\Windows\Installer\");
             _pathPrefixes.Add(@"C:\Windows\assembly\");
-            _pathPrefixes.Add(@"C:\ProgramData\LocalEDR\");
 
             // Load user whitelist
             if (File.Exists(_whitelistPath))
@@ -2620,12 +2676,44 @@ namespace LocalEDR
             // Initialize whitelist
             _whitelist = new Whitelist(baseDir);
 
+            // Self-protection: hash our own files so the EDR never quarantines itself
+            RegisterSelfHashes(baseDir);
+
             Logger.Info(string.Format("EDR Engine initialized ({0} YARA rules, {1} hash DB entries)",
                 _yara.Rules.Count, _hashDB.Count));
         }
 
         // Whitelist to reduce false positives
         Whitelist _whitelist;
+
+        void RegisterSelfHashes(string baseDir)
+        {
+            var hashes = new List<string>();
+            try
+            {
+                foreach (string file in Directory.EnumerateFiles(baseDir, "*", SearchOption.AllDirectories))
+                {
+                    string rel = file.Substring(baseDir.Length);
+                    if (rel.StartsWith("Logs", StringComparison.OrdinalIgnoreCase) ||
+                        rel.StartsWith("Quarantine", StringComparison.OrdinalIgnoreCase) ||
+                        rel.StartsWith("Rules", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    try
+                    {
+                        byte[] bytes = File.ReadAllBytes(file);
+                        using (var sha = SHA256.Create())
+                        {
+                            string hash = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "");
+                            hashes.Add(hash);
+                        }
+                    }
+                    catch { }
+                }
+                ScoringEngine.RegisterSelfHashes(hashes);
+                Logger.Info(string.Format("Self-protection: registered {0} EDR file hashes", hashes.Count));
+            }
+            catch (Exception ex) { Logger.Warn("Self-hash registration failed: " + ex.Message); }
+        }
 
         public AnalysisResult RunAnalysis(string filePath, int pid, string cmdLine)
         {

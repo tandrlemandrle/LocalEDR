@@ -35,6 +35,45 @@ public class EDREngine
         // Load custom rules if present
         string customRules = Path.Combine(config.RulesPath, "custom_rules.json");
         if (File.Exists(customRules)) _yara.LoadRulesFromJson(customRules);
+
+        // Self-protection: hash our own files so the EDR never quarantines itself
+        RegisterSelfHashes();
+    }
+
+    /// <summary>
+    /// Compute SHA256 of every file in the EDR's own directory and register
+    /// them with the ScoringEngine so they always score Clean.
+    /// </summary>
+    private void RegisterSelfHashes()
+    {
+        var selfHashes = new List<string>();
+        string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        try
+        {
+            foreach (string file in Directory.EnumerateFiles(baseDir, "*", SearchOption.AllDirectories))
+            {
+                // Skip logs, quarantine, and rules — those change at runtime
+                string rel = file[baseDir.Length..];
+                if (rel.StartsWith("Logs", StringComparison.OrdinalIgnoreCase) ||
+                    rel.StartsWith("Quarantine", StringComparison.OrdinalIgnoreCase) ||
+                    rel.StartsWith("Rules", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    byte[] bytes = File.ReadAllBytes(file);
+                    string sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+                    selfHashes.Add(sha256);
+                }
+                catch { /* skip files we can't read */ }
+            }
+            ScoringEngine.RegisterSelfHashes(selfHashes);
+            Logger.Info($"Self-protection: registered {selfHashes.Count} EDR file hashes");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Self-hash registration failed: {ex.Message}");
+        }
     }
 
     // ── Full analysis pipeline ────────────────────────────────
