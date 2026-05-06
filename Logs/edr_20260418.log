@@ -1,0 +1,10 @@
+[2026-04-18 14:19:29.006] [INFO] YARA engine initialized with 14 rules
+[2026-04-18 14:19:29.010] [INFO] Local EDR ready. Type 'help' for commands.
+
+[2026-04-18 14:20:26.756] [WARN] Auto-response ENABLED
+[2026-04-18 14:20:33.193] [INFO] Process monitor active
+[2026-04-18 14:20:33.195] [INFO] File monitor: C:\Users\Admin
+[2026-04-18 14:20:33.195] [INFO] File monitor: C:\Users\Admin\AppData\Local\Temp\
+[2026-04-18 14:20:33.195] [INFO] File monitor: C:\Windows\Temp
+[2026-04-18 14:20:33.195] [INFO] Network monitor started (10s interval)
+[2026-04-18 14:20:33.196] [INFO] Monitoring started. Type 'stop' to end.
